@@ -192,7 +192,13 @@ main h1{font-size:2.1rem;font-weight:800;letter-spacing:-.02em}
 <div class="toast hidden" id="toast"></div>
 <canvas id="fx"></canvas>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
+/* ===== SUPABASE AYARLARI: Supabase → Project Settings → API ===== */
+const SUPABASE_URL='https://ggqofuwqfbmxhvyeiozg.supabase.co';       // məs: https://abcdxyz.supabase.co
+const SUPABASE_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdncW9mdXdxZmJteGh2eWVpb3pnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI1MDU5MzgsImV4cCI6MjEwODA4MTkzOH0.GGQMM8EYnQv31JVdtJEAylGsSkgSdwZ0ktYZ91VIce0';    // yalnız "anon public" açar! service_role açarını bura QOYMA
+const sb=(window.supabase&&!SUPABASE_URL.startsWith('BURAYA'))?window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY):null;
+
 const COURSES=[
  {id:'sec',ic:'🛡️',cat:'Təhlükəsizlik',t:'Kibertəhlükəsizliyin əsasları',d:'Rəqəmsal təhlükələri tanı və özünü qoru.',lv:'Başlanğıc',h:10,g:'linear-gradient(135deg,#1450d6,#0a1f4d)',
   m:['Təhlükə növləri və hücum nümunələri','Parol və çoxfaktorlu autentifikasiya','Zərərli proqramlar və qorunma','Sosial mühəndislik və fişinq','Təhlükəsiz gündəlik davranış']},
@@ -228,10 +234,11 @@ const esc=s=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&q
 const $=s=>document.querySelector(s);
 const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
 
+/* Hesab məlumatı (ad, e-poçt, hash, salt) Supabase-dədir. Burada yalnız kurs proqresi saxlanır. */
 const db={
- users:()=>{try{return JSON.parse(localStorage.getItem('users'))||{}}catch(e){return{}}},
- save:u=>{const a=db.users();a[u.email]=u;localStorage.setItem('users',JSON.stringify(a))},
- cur:()=>db.users()[localStorage.getItem('session')]
+ prog:e=>{try{return JSON.parse(localStorage.getItem('prog:'+e))||{progress:{},seen:['a1']}}catch(x){return{progress:{},seen:['a1']}}},
+ save:u=>localStorage.setItem('prog:'+u.email,JSON.stringify({progress:u.progress,seen:u.seen,joined:u.joined})),
+ cur:()=>{const e=localStorage.getItem('session');if(!e)return null;return {...db.prog(e),name:localStorage.getItem('sname')||e,email:e}}
 };
 let mode='reg',panel='courses',cat='Hamısı',openId=null;
 
@@ -317,34 +324,38 @@ $('#tLog').onclick=()=>setMode('log');
 $('#form').onsubmit=async e=>{
  e.preventDefault();
  if(!(window.crypto&&crypto.subtle))return setMsg('Bu brauzerdə şifrələmə funksiyası əlçatan deyil (HTTPS və ya localhost lazımdır).');
+ if(!sb)return setMsg('Supabase ayarları doldurulmayıb (SUPABASE_URL və SUPABASE_KEY).');
  const name=$('#name').value.trim(),email=$('#email').value.trim().toLowerCase(),pass=$('#pass').value;
  if(mode==='reg'&&name.length<2)return setMsg('Adını yaz.');
  if(!/^\S+@\S+\.\S+$/.test(email))return setMsg('Düzgün e-poçt ünvanı yaz.');
  if(pass.length<6)return setMsg('Şifrə ən azı 6 simvol olmalıdır.');
  const btn=$('#submit');btn.disabled=true;
  try{
-  const users=db.users();
   if(mode==='reg'){
-   if(users[email])return setMsg('Bu e-poçt artıq qeydiyyatdan keçib. Giriş et.');
-   /* Açıq şifrə saxlanmır: yalnız salt, iter və hash */
-   db.save({name,email,...await makeCred(pass),joined:new Date().toLocaleDateString('az'),progress:{},seen:['a1']});
+   /* Brauzer yalnız hash, salt və iter göndərir; açıq şifrə heç yerə getmir */
+   const c=await makeCred(pass);
+   const {data,error}=await sb.rpc('register_user',{p_name:name,p_email:email,p_hash:c.hash,p_salt:c.salt,p_iter:c.iter});
+   if(error){console.error(error);return setMsg('Server xətası: '+error.message)}
+   if(data==='EMAIL_EXISTS')return setMsg('Bu e-poçt artıq qeydiyyatdan keçib. Giriş et.');
+   db.save({email,progress:{},seen:['a1'],joined:new Date().toLocaleDateString('az')});
    $('#form').reset();setMode('log');
    $('#email').value=email;$('#pass').focus();
    setMsg('✅ Qeydiyyat uğurludur! İndi şifrənlə daxil ol.',true);
    return;
   }
-  const u=users[email];let ok=false;
-  if(u&&u.hash){
-   ok=same(await hashPw(pass,unb64(u.salt),u.iter),u.hash);
-  }else if(u&&u.pass!==undefined&&u.pass===pass){
-   /* köhnə (açıq şifrəli) hesab: girişdə avtomatik hash-ə çevrilir */
-   Object.assign(u,await makeCred(pass));delete u.pass;db.save(u);ok=true;
-  }
-  if(!ok)return setMsg('E-poçt və ya şifrə səhvdir.');
-  localStorage.setItem('session',email);
+  /* Giriş: 1) salt və iter al  2) hash-i brauzerdə hesabla  3) serverdə yoxla */
+  const {data:meta,error:e1}=await sb.rpc('get_salt',{p_email:email});
+  if(e1||!meta){console.error(e1);return setMsg('Serverə qoşulmaq olmadı.')}
+  const h=await hashPw(pass,unb64(meta.salt),meta.iter);
+  const {data:res,error:e2}=await sb.rpc('verify_login',{p_email:email,p_hash:h});
+  if(e2){console.error(e2);return setMsg('Server xətası: '+e2.message)}
+  if(res&&res.blocked)return setMsg('Çox sayda uğursuz cəhd. 10 dəqiqə sonra yenidən cəhd et.');
+  if(!res)return setMsg('E-poçt və ya şifrə səhvdir.');
+  localStorage.setItem('session',email);localStorage.setItem('sname',res.name);
   $('#form').reset();
   enter(true);
- }finally{btn.disabled=false}
+ }catch(err){console.error(err);setMsg('Gözlənilməz xəta. Brauzer konsoluna bax.')}
+ finally{btn.disabled=false}
 };
 
 function enter(animated){
@@ -355,7 +366,7 @@ function enter(animated){
  setTimeout(()=>{go();s.classList.add('hidden');confetti();toast('👋 Xoş gəldin, '+db.cur().name.split(' ')[0]+'!')},1900);
 }
 $('#logout').onclick=()=>{
- localStorage.removeItem('session');closeModal();
+ localStorage.removeItem('session');localStorage.removeItem('sname');closeModal();
  $('#app').classList.add('hidden');$('#auth').classList.remove('hidden');setMode('log');
 };
 
@@ -398,7 +409,7 @@ function show(p){
   h=`<h1>Profil</h1><p class="sub">Hesab məlumatların.</p><div class="card pad"><div class="avatar">${esc(u.name[0].toUpperCase())}</div>
   <div class="row"><span>Ad</span><b>${esc(u.name)}</b></div>
   <div class="row"><span>E-poçt</span><b>${esc(u.email)}</b></div>
-  <div class="row"><span>Qoşulma tarixi</span><b>${u.joined}</b></div>
+  <div class="row"><span>Qoşulma tarixi</span><b>${u.joined||'—'}</b></div>
   <div class="row"><span>Tamamlanan modul</span><b>${total(u)}</b></div></div>`;
  }
  v.innerHTML=h;countUp(v);fillBars(v);
